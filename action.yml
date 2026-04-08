@@ -1,0 +1,89 @@
+name: 'Upload to OBS'
+description: 'Upload a file to Huawei Cloud OBS bucket and return the public URL'
+
+inputs:
+  access_key:
+    description: 'Huawei Cloud Access Key (AK)'
+    required: true
+  secret_key:
+    description: 'Huawei Cloud Secret Key (SK)'
+    required: true
+  file_path:
+    description: 'Path to the file to upload'
+    required: true
+  file_name:
+    description: 'Target file name in OBS (defaults to source file basename)'
+    required: false
+    default: ''
+
+outputs:
+  url:
+    description: 'Public URL of the uploaded file'
+    value: ${{ steps.upload.outputs.url }}
+  object_key:
+    description: 'Object key in OBS bucket'
+    value: ${{ steps.upload.outputs.object_key }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Download and setup obsutil
+      shell: bash
+      run: |
+        OBSUTIL_VERSION="5.5.12"
+        wget -q "https://obs-community.obs.cn-north-1.myhuaweicloud.com/obsutil/current/obsutil_linux_amd64.tar.gz" -O /tmp/obsutil.tar.gz
+        tar -xzf /tmp/obsutil.tar.gz -C /tmp
+        OBSUTIL_DIR=$(find /tmp -maxdepth 1 -name "obsutil_linux_amd64_*" -type d | head -1)
+        chmod +x "${OBSUTIL_DIR}/obsutil"
+        echo "${OBSUTIL_DIR}" >> $GITHUB_PATH
+
+    - name: Configure obsutil
+      shell: bash
+      run: |
+        obsutil config \
+          -i=${{ inputs.access_key }} \
+          -k=${{ inputs.secret_key }} \
+          -e=<YOUR_ENDPOINT>
+
+    - name: Upload file to OBS
+      id: upload
+      shell: bash
+      run: |
+        # ========== CONFIG (edit these) ==========
+        BUCKET="<YOUR_BUCKET_NAME>"
+        ENDPOINT="<YOUR_ENDPOINT>"
+        PATH_PREFIX="<YOUR_PATH_PREFIX>"
+        # ==========================================
+
+        FILE_PATH="${{ inputs.file_path }}"
+        FILE_NAME="${{ inputs.file_name }}"
+
+        if [ ! -f "${FILE_PATH}" ]; then
+          echo "::error::File not found: ${FILE_PATH}"
+          exit 1
+        fi
+
+        # Use provided file_name or fallback to source basename
+        if [ -z "${FILE_NAME}" ]; then
+          FILE_NAME=$(basename "${FILE_PATH}")
+        fi
+
+        # Build object key: prefix/timestamp/filename
+        TIMESTAMP=$(date +%Y%m%d%H%M%S)
+        OBJECT_KEY="${PATH_PREFIX}/${TIMESTAMP}/${FILE_NAME}"
+
+        echo "Uploading ${FILE_PATH} -> obs://${BUCKET}/${OBJECT_KEY}"
+
+        obsutil cp "${FILE_PATH}" "obs://${BUCKET}/${OBJECT_KEY}"
+
+        if [ $? -ne 0 ]; then
+          echo "::error::Upload failed"
+          exit 1
+        fi
+
+        # Build public URL
+        URL="https://${BUCKET}.${ENDPOINT}/${OBJECT_KEY}"
+
+        echo "url=${URL}" >> $GITHUB_OUTPUT
+        echo "object_key=${OBJECT_KEY}" >> $GITHUB_OUTPUT
+        echo "::notice::File uploaded successfully: ${URL}"
