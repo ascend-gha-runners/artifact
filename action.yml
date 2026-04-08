@@ -43,16 +43,16 @@ runs:
         obsutil config \
           -i=${{ inputs.access_key }} \
           -k=${{ inputs.secret_key }} \
-          -e=<YOUR_ENDPOINT>
+          -e=obs.ap-southeast-1.myhuaweicloud.com
 
     - name: Upload file to OBS
       id: upload
       shell: bash
       run: |
         # ========== CONFIG (edit these) ==========
-        BUCKET="<YOUR_BUCKET_NAME>"
-        ENDPOINT="<YOUR_ENDPOINT>"
-        PATH_PREFIX="<YOUR_PATH_PREFIX>"
+        BUCKET="ascend-ci-cache-hk"
+        ENDPOINT="obs.ap-southeast-1.myhuaweicloud.com"
+        PATH_PREFIX="github-actions"
         # ==========================================
 
         FILE_PATH="${{ inputs.file_path }}"
