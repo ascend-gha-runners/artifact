@@ -137,15 +137,17 @@ runs:
                 fi
               done < <(find "${MATCH}" -type f -print0)
             else
-              REL=$(basename "${MATCH}")
+              REL="${MATCH#./}"
               EXCLUDED=false
               for EXCL in "${EXCLUDE_PATTERNS[@]}"; do
-                case "${MATCH}" in
+                case "${REL}" in
                   ${EXCL}) EXCLUDED=true; break ;;
                 esac
               done
               if [ "${EXCLUDED}" = "false" ]; then
-                cp "${MATCH}" "${STAGING_DIR}/${REL}"
+                TARGET="${STAGING_DIR}/${REL}"
+                mkdir -p "$(dirname "${TARGET}")"
+                cp "${MATCH}" "${TARGET}"
                 FILE_COUNT=$((FILE_COUNT + 1))
               fi
             fi
@@ -174,7 +176,7 @@ runs:
         TOTAL_SIZE=$(du -sb "${STAGING_DIR}" | awk '{print $1}')
         echo "Uploading ${FILE_COUNT} file(s), total size: ${TOTAL_SIZE} bytes"
 
-        obsutil cp "${STAGING_DIR}" "obs://${BUCKET}/${OBJECT_PREFIX}/" -r -f > /tmp/obsutil_upload.log 2>&1
+        obsutil cp "${STAGING_DIR}/" "obs://${BUCKET}/${OBJECT_PREFIX}/" -r -f > /tmp/obsutil_upload.log 2>&1
         if [ $? -ne 0 ]; then
           echo "::error::Upload failed. See log:"
           cat /tmp/obsutil_upload.log

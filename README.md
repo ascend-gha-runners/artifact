@@ -60,8 +60,7 @@ Download a single artifact by its exact name.
 Result:
 ```
 output/
-└── my-artifact/
-    └── <uploaded files>
+└── <uploaded files>
 ```
 
 ### By glob pattern

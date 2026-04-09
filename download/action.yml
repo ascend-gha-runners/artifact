@@ -183,10 +183,11 @@ runs:
             exit 1
           fi
 
-          # merge-multiple: move files from ABS_DEST/{ANAME}/ up to ABS_DEST/
-          if [ "${MERGE_MULTIPLE}" = "true" ] && [ -d "${ABS_DEST}/${ANAME}" ]; then
-            mv "${ABS_DEST}/${ANAME}"/* "${ABS_DEST}/" 2>/dev/null || true
-            rmdir "${ABS_DEST}/${ANAME}" 2>/dev/null || true
+          # Single artifact by name: flatten into path/ (match official behavior)
+          # Multiple artifacts with merge-multiple: also flatten into path/
+          if { [ -n "${ARTIFACT_NAME}" ] || [ "${MERGE_MULTIPLE}" = "true" ]; } && [ -d "${ABS_DEST}/${ANAME}" ]; then
+            cp -a "${ABS_DEST}/${ANAME}/." "${ABS_DEST}/"
+            rm -rf "${ABS_DEST}/${ANAME}"
           fi
 
           DOWNLOADED_NAMES+=("${ANAME}")
