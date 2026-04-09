@@ -1,0 +1,172 @@
+name: 'Upload Artifact to OBS'
+description: 'Upload artifact to Huawei Cloud OBS with metadata registry. Drop-in replacement for actions/upload-artifact.'
+
+inputs:
+  access_key:
+    description: 'Huawei Cloud Access Key (AK)'
+    required: true
+  secret_key:
+    description: 'Huawei Cloud Secret Key (SK)'
+    required: true
+  name:
+    description: 'Artifact name (used to retrieve it later via download action)'
+    required: true
+  path:
+    description: 'File or directory to upload'
+    required: true
+  if-no-files-found:
+    description: 'Behavior if no files are found at the path: warn, error, or ignore'
+    required: false
+    default: 'warn'
+  retention-days:
+    description: 'Number of days to retain the artifact (recorded in metadata only)'
+    required: false
+    default: '90'
+  bucket:
+    description: 'OBS bucket name'
+    required: false
+    default: 'ascend-ci-cache-hk'
+  endpoint:
+    description: 'OBS endpoint'
+    required: false
+    default: 'obs.ap-southeast-1.myhuaweicloud.com'
+
+outputs:
+  artifact-id:
+    description: 'Artifact identifier (object prefix in OBS)'
+    value: ${{ steps.upload.outputs.artifact_id }}
+  artifact-url:
+    description: 'Public URL prefix of the uploaded artifact'
+    value: ${{ steps.upload.outputs.artifact_url }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup obsutil
+      shell: bash
+      run: |
+        if command -v obsutil &>/dev/null; then
+          echo "obsutil already installed, skipping setup"
+          exit 0
+        fi
+        {
+          ARCH=$(uname -m)
+          if [ "${ARCH}" = "aarch64" ] || [ "${ARCH}" = "arm64" ]; then
+            OBSUTIL_ARCH="arm64"
+          else
+            OBSUTIL_ARCH="amd64"
+          fi
+          curl -sSL "https://obs-community.obs.cn-north-1.myhuaweicloud.com/obsutil/current/obsutil_linux_${OBSUTIL_ARCH}.tar.gz" \
+            -o /tmp/obsutil.tar.gz
+          tar -xzf /tmp/obsutil.tar.gz -C /tmp
+          OBSUTIL_DIR=$(find /tmp -maxdepth 1 -name "obsutil_linux_${OBSUTIL_ARCH}_*" -type d | head -1)
+          chmod +x "${OBSUTIL_DIR}/obsutil"
+          echo "${OBSUTIL_DIR}" >> $GITHUB_PATH
+        } > /dev/null 2>&1
+        echo "obsutil setup complete"
+
+    - name: Configure obsutil
+      shell: bash
+      run: |
+        obsutil config \
+          -i=${{ inputs.access_key }} \
+          -k=${{ inputs.secret_key }} \
+          -e=${{ inputs.endpoint }} > /dev/null 2>&1
+        echo "OBS credentials configured"
+
+    - name: Upload artifact
+      id: upload
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        BUCKET="${{ inputs.bucket }}"
+        ENDPOINT="${{ inputs.endpoint }}"
+        NAME="${{ inputs.name }}"
+        FILE_PATH="${{ inputs.path }}"
+        REPO="${{ github.repository }}"
+        RUN_ID="${{ github.run_id }}"
+
+        # Deterministic path: artifacts/{repo}/{run_id}/{name}/
+        OBJECT_PREFIX="artifacts/${REPO}/${RUN_ID}/${NAME}"
+        META_KEY="artifacts/${REPO}/${RUN_ID}/_meta/${NAME}.json"
+
+        # ── Check if source path exists ──
+        if [ ! -e "${FILE_PATH}" ]; then
+          case "${{ inputs.if-no-files-found }}" in
+            error)
+              echo "::error::Path not found: ${FILE_PATH}"
+              exit 1
+              ;;
+            warn)
+              echo "::warning::Path not found: ${FILE_PATH}, skipping upload"
+              exit 0
+              ;;
+            ignore)
+              exit 0
+              ;;
+          esac
+        fi
+
+        # ── Upload files ──
+        FILE_COUNT=0
+        TOTAL_SIZE=0
+
+        if [ -d "${FILE_PATH}" ]; then
+          echo "Uploading directory: ${FILE_PATH}"
+          obsutil cp "${FILE_PATH}" "obs://${BUCKET}/${OBJECT_PREFIX}/" -r -f > /tmp/obsutil_upload.log 2>&1
+          if [ $? -ne 0 ]; then
+            echo "::error::Upload failed. See log:"
+            cat /tmp/obsutil_upload.log
+            exit 1
+          fi
+          FILE_COUNT=$(find "${FILE_PATH}" -type f | wc -l)
+          TOTAL_SIZE=$(du -sb "${FILE_PATH}" | awk '{print $1}')
+          UPLOAD_TYPE="directory"
+        else
+          echo "Uploading file: ${FILE_PATH}"
+          FILENAME=$(basename "${FILE_PATH}")
+          obsutil cp "${FILE_PATH}" "obs://${BUCKET}/${OBJECT_PREFIX}/${FILENAME}" > /tmp/obsutil_upload.log 2>&1
+          if [ $? -ne 0 ]; then
+            echo "::error::Upload failed. See log:"
+            cat /tmp/obsutil_upload.log
+            exit 1
+          fi
+          FILE_COUNT=1
+          TOTAL_SIZE=$(stat -c%s "${FILE_PATH}" 2>/dev/null || stat -f%z "${FILE_PATH}" 2>/dev/null)
+          UPLOAD_TYPE="file"
+        fi
+
+        echo "Uploaded ${FILE_COUNT} file(s), total size: ${TOTAL_SIZE} bytes"
+
+        # ── Write metadata ──
+        CREATED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        cat > /tmp/_artifact_meta.json <<METAEOF
+        {
+          "name": "${NAME}",
+          "repository": "${REPO}",
+          "run_id": "${RUN_ID}",
+          "object_prefix": "${OBJECT_PREFIX}",
+          "upload_type": "${UPLOAD_TYPE}",
+          "file_count": ${FILE_COUNT},
+          "total_size": ${TOTAL_SIZE},
+          "created_at": "${CREATED_AT}",
+          "retention_days": ${{ inputs.retention-days }},
+          "workflow": "${{ github.workflow }}",
+          "job": "${{ github.job }}",
+          "sha": "${{ github.sha }}"
+        }
+        METAEOF
+
+        obsutil cp /tmp/_artifact_meta.json "obs://${BUCKET}/${META_KEY}" > /dev/null 2>&1
+        if [ $? -ne 0 ]; then
+          echo "::warning::Failed to upload metadata, artifact files were uploaded successfully"
+        fi
+
+        # ── Set outputs ──
+        ARTIFACT_URL="https://${BUCKET}.${ENDPOINT}/${OBJECT_PREFIX}"
+        echo "artifact_id=${OBJECT_PREFIX}" >> $GITHUB_OUTPUT
+        echo "artifact_url=${ARTIFACT_URL}" >> $GITHUB_OUTPUT
+
+        echo "Artifact '${NAME}' uploaded successfully"
+        echo "  URL: ${ARTIFACT_URL}"

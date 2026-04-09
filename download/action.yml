@@ -1,0 +1,201 @@
+name: 'Download Artifact from OBS'
+description: 'Download artifacts from Huawei Cloud OBS by name or pattern. Drop-in replacement for actions/download-artifact.'
+
+inputs:
+  access_key:
+    description: 'Huawei Cloud Access Key (AK)'
+    required: true
+  secret_key:
+    description: 'Huawei Cloud Secret Key (SK)'
+    required: true
+  name:
+    description: 'Exact artifact name to download. Mutually exclusive with pattern.'
+    required: false
+    default: ''
+  pattern:
+    description: 'Glob pattern to match artifact names (e.g. timing-data-*). Mutually exclusive with name.'
+    required: false
+    default: ''
+  path:
+    description: 'Local destination directory for downloaded files'
+    required: false
+    default: '.'
+  merge-multiple:
+    description: 'When downloading multiple artifacts, merge all files into path/ instead of path/{name}/ subdirs'
+    required: false
+    default: 'false'
+  run-id:
+    description: 'Run ID to download from. Defaults to current run.'
+    required: false
+    default: ''
+  repository:
+    description: 'Repository in owner/repo format. Defaults to current repository.'
+    required: false
+    default: ''
+  bucket:
+    description: 'OBS bucket name'
+    required: false
+    default: 'ascend-ci-cache-hk'
+  endpoint:
+    description: 'OBS endpoint'
+    required: false
+    default: 'obs.ap-southeast-1.myhuaweicloud.com'
+
+outputs:
+  download-path:
+    description: 'Absolute path to the directory where artifacts were downloaded'
+    value: ${{ steps.download.outputs.download-path }}
+  matched-artifacts:
+    description: 'Space-separated list of matched artifact names'
+    value: ${{ steps.download.outputs.matched-artifacts }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup obsutil
+      shell: bash
+      run: |
+        if command -v obsutil &>/dev/null; then
+          echo "obsutil already installed, skipping setup"
+          exit 0
+        fi
+        {
+          ARCH=$(uname -m)
+          if [ "${ARCH}" = "aarch64" ] || [ "${ARCH}" = "arm64" ]; then
+            OBSUTIL_ARCH="arm64"
+          else
+            OBSUTIL_ARCH="amd64"
+          fi
+          curl -sSL "https://obs-community.obs.cn-north-1.myhuaweicloud.com/obsutil/current/obsutil_linux_${OBSUTIL_ARCH}.tar.gz" \
+            -o /tmp/obsutil.tar.gz
+          tar -xzf /tmp/obsutil.tar.gz -C /tmp
+          OBSUTIL_DIR=$(find /tmp -maxdepth 1 -name "obsutil_linux_${OBSUTIL_ARCH}_*" -type d | head -1)
+          chmod +x "${OBSUTIL_DIR}/obsutil"
+          echo "${OBSUTIL_DIR}" >> $GITHUB_PATH
+        } > /dev/null 2>&1
+        echo "obsutil setup complete"
+
+    - name: Configure obsutil
+      shell: bash
+      run: |
+        obsutil config \
+          -i=${{ inputs.access_key }} \
+          -k=${{ inputs.secret_key }} \
+          -e=${{ inputs.endpoint }} > /dev/null 2>&1
+        echo "OBS credentials configured"
+
+    - name: Download artifact(s)
+      id: download
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        BUCKET="${{ inputs.bucket }}"
+        ARTIFACT_NAME="${{ inputs.name }}"
+        PATTERN="${{ inputs.pattern }}"
+        DEST_PATH="${{ inputs.path }}"
+        MERGE_MULTIPLE="${{ inputs.merge-multiple }}"
+        RUN_ID="${{ inputs.run-id }}"
+        REPO="${{ inputs.repository }}"
+
+        # Resolve defaults
+        if [ -z "${REPO}" ]; then
+          REPO="${{ github.repository }}"
+        fi
+        if [ -z "${RUN_ID}" ]; then
+          RUN_ID="${{ github.run_id }}"
+        fi
+
+        META_PREFIX="artifacts/${REPO}/${RUN_ID}/_meta"
+
+        # Validate inputs
+        if [ -z "${ARTIFACT_NAME}" ] && [ -z "${PATTERN}" ]; then
+          echo "::error::Either 'name' or 'pattern' input is required"
+          exit 1
+        fi
+        if [ -n "${ARTIFACT_NAME}" ] && [ -n "${PATTERN}" ]; then
+          echo "::error::'name' and 'pattern' are mutually exclusive"
+          exit 1
+        fi
+
+        mkdir -p "${DEST_PATH}"
+        ABS_DEST=$(realpath "${DEST_PATH}")
+
+        # ── Resolve which artifacts to download ──
+        ARTIFACTS_TO_DOWNLOAD=()
+
+        if [ -n "${ARTIFACT_NAME}" ]; then
+          # Exact name lookup: check metadata exists
+          META_KEY="${META_PREFIX}/${ARTIFACT_NAME}.json"
+          if ! obsutil ls "obs://${BUCKET}/${META_KEY}" > /dev/null 2>&1; then
+            echo "::error::Artifact '${ARTIFACT_NAME}' not found in run ${RUN_ID} of ${REPO}"
+            echo "  Expected metadata at: obs://${BUCKET}/${META_KEY}"
+            exit 1
+          fi
+          ARTIFACTS_TO_DOWNLOAD+=("${ARTIFACT_NAME}")
+        else
+          # Pattern matching: list all metadata files, filter by pattern
+          echo "Listing artifacts matching pattern: ${PATTERN}"
+          META_LIST=$(obsutil ls "obs://${BUCKET}/${META_PREFIX}/" 2>/dev/null | grep '\.json$' | awk '{print $NF}' || true)
+          if [ -z "${META_LIST}" ]; then
+            echo "::warning::No artifacts found in run ${RUN_ID} of ${REPO}"
+            echo "download-path=${ABS_DEST}" >> $GITHUB_OUTPUT
+            echo "matched-artifacts=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          while IFS= read -r line; do
+            # Extract artifact name from path: .../meta/{name}.json
+            FNAME=$(basename "${line}" .json)
+            # Shell glob pattern matching
+            # shellcheck disable=SC2254
+            case "${FNAME}" in
+              ${PATTERN})
+                ARTIFACTS_TO_DOWNLOAD+=("${FNAME}")
+                ;;
+            esac
+          done <<< "${META_LIST}"
+
+          if [ ${#ARTIFACTS_TO_DOWNLOAD[@]} -eq 0 ]; then
+            echo "::warning::No artifacts matched pattern '${PATTERN}' in run ${RUN_ID}"
+            echo "download-path=${ABS_DEST}" >> $GITHUB_OUTPUT
+            echo "matched-artifacts=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+        fi
+
+        echo "Found ${#ARTIFACTS_TO_DOWNLOAD[@]} artifact(s): ${ARTIFACTS_TO_DOWNLOAD[*]}"
+
+        # ── Download each artifact ──
+        DOWNLOADED_NAMES=()
+
+        for ANAME in "${ARTIFACTS_TO_DOWNLOAD[@]}"; do
+          OBS_PREFIX="artifacts/${REPO}/${RUN_ID}/${ANAME}/"
+
+          if [ "${MERGE_MULTIPLE}" = "true" ]; then
+            LOCAL_DIR="${ABS_DEST}"
+          else
+            LOCAL_DIR="${ABS_DEST}/${ANAME}"
+          fi
+          mkdir -p "${LOCAL_DIR}"
+
+          echo "Downloading artifact '${ANAME}' -> ${LOCAL_DIR}"
+          obsutil cp "obs://${BUCKET}/${OBS_PREFIX}" "${LOCAL_DIR}/" -r -f > /tmp/obsutil_download_${ANAME}.log 2>&1
+
+          if [ $? -ne 0 ]; then
+            echo "::error::Download failed for artifact '${ANAME}'. Log:"
+            cat "/tmp/obsutil_download_${ANAME}.log"
+            exit 1
+          fi
+
+          DOWNLOADED_NAMES+=("${ANAME}")
+          echo "  Downloaded '${ANAME}' successfully"
+        done
+
+        # ── Set outputs ──
+        MATCHED_LIST="${DOWNLOADED_NAMES[*]}"
+        echo "download-path=${ABS_DEST}" >> $GITHUB_OUTPUT
+        echo "matched-artifacts=${MATCHED_LIST}" >> $GITHUB_OUTPUT
+
+        echo "All artifacts downloaded to: ${ABS_DEST}"
+        echo "Matched artifacts: ${MATCHED_LIST}"
