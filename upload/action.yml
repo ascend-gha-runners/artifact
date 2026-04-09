@@ -176,12 +176,16 @@ runs:
         TOTAL_SIZE=$(du -sb "${STAGING_DIR}" | awk '{print $1}')
         echo "Uploading ${FILE_COUNT} file(s), total size: ${TOTAL_SIZE} bytes"
 
-        obsutil cp "${STAGING_DIR}/" "obs://${BUCKET}/${OBJECT_PREFIX}/" -r -f > /tmp/obsutil_upload.log 2>&1
-        if [ $? -ne 0 ]; then
-          echo "::error::Upload failed. See log:"
-          cat /tmp/obsutil_upload.log
-          exit 1
-        fi
+        # Upload each top-level entry individually to avoid staging dir name leaking into OBS path
+        > /tmp/obsutil_upload.log
+        for item in "${STAGING_DIR}"/*; do
+          [ -e "${item}" ] || continue
+          if ! obsutil cp "${item}" "obs://${BUCKET}/${OBJECT_PREFIX}/" -r -f >> /tmp/obsutil_upload.log 2>&1; then
+            echo "::error::Upload failed. See log:"
+            cat /tmp/obsutil_upload.log
+            exit 1
+          fi
+        done
 
         rm -rf "${STAGING_DIR}"
         echo "Uploaded ${FILE_COUNT} file(s), total size: ${TOTAL_SIZE} bytes"
