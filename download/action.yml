@@ -172,20 +172,21 @@ runs:
         for ANAME in "${ARTIFACTS_TO_DOWNLOAD[@]}"; do
           OBS_PREFIX="artifacts/${REPO}/${RUN_ID}/${ANAME}/"
 
-          if [ "${MERGE_MULTIPLE}" = "true" ]; then
-            LOCAL_DIR="${ABS_DEST}"
-          else
-            LOCAL_DIR="${ABS_DEST}/${ANAME}"
-          fi
-          mkdir -p "${LOCAL_DIR}"
-
-          echo "Downloading artifact '${ANAME}' -> ${LOCAL_DIR}"
-          obsutil cp "obs://${BUCKET}/${OBS_PREFIX}" "${LOCAL_DIR}/" -r -f > /tmp/obsutil_download_${ANAME}.log 2>&1
+          # Download to ABS_DEST/ — obsutil preserves the last path component,
+          # so it will create ABS_DEST/{ANAME}/ automatically.
+          echo "Downloading artifact '${ANAME}' -> ${ABS_DEST}/${ANAME}/"
+          obsutil cp "obs://${BUCKET}/${OBS_PREFIX}" "${ABS_DEST}/" -r -f > /tmp/obsutil_download_${ANAME}.log 2>&1
 
           if [ $? -ne 0 ]; then
             echo "::error::Download failed for artifact '${ANAME}'. Log:"
             cat "/tmp/obsutil_download_${ANAME}.log"
             exit 1
+          fi
+
+          # merge-multiple: move files from ABS_DEST/{ANAME}/ up to ABS_DEST/
+          if [ "${MERGE_MULTIPLE}" = "true" ] && [ -d "${ABS_DEST}/${ANAME}" ]; then
+            mv "${ABS_DEST}/${ANAME}"/* "${ABS_DEST}/" 2>/dev/null || true
+            rmdir "${ABS_DEST}/${ANAME}" 2>/dev/null || true
           fi
 
           DOWNLOADED_NAMES+=("${ANAME}")
