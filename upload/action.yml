@@ -12,7 +12,11 @@ inputs:
     description: 'Artifact name (used to retrieve it later via download action)'
     required: true
   path:
-    description: 'File or directory to upload'
+    description: |
+      File, directory, or glob patterns to upload. Supports multiline, e.g.:
+        dist/
+        *.json
+        !dist/**/*.map
     required: true
   if-no-files-found:
     description: 'Behavior if no files are found at the path: warn, error, or ignore'
@@ -91,15 +95,73 @@ runs:
         OBJECT_PREFIX="artifacts/${REPO}/${RUN_ID}/${NAME}"
         META_KEY="artifacts/${REPO}/${RUN_ID}/_meta/${NAME}.json"
 
-        # ── Check if source path exists ──
-        if [ ! -e "${FILE_PATH}" ]; then
+        # ── Expand multiline path input into include/exclude lists ──
+        # Supports: single path, directory, glob, multiline, ! exclusions
+        INCLUDE_PATTERNS=()
+        EXCLUDE_PATTERNS=()
+        while IFS= read -r line; do
+          line="${line#"${line%%[![:space:]]*}"}"  # trim leading whitespace
+          line="${line%"${line##*[![:space:]]}"}"  # trim trailing whitespace
+          [ -z "${line}" ] && continue
+          if [[ "${line}" == '!'* ]]; then
+            EXCLUDE_PATTERNS+=("${line:1}")
+          else
+            INCLUDE_PATTERNS+=("${line}")
+          fi
+        done <<< "${FILE_PATH}"
+
+        # Collect matching files using find + glob expansion
+        STAGING_DIR=$(mktemp -d)
+        FILE_COUNT=0
+
+        for PATTERN in "${INCLUDE_PATTERNS[@]}"; do
+          # Use bash glob expansion; fall back to literal path
+          shopt -s globstar nullglob
+          for MATCH in ${PATTERN}; do
+            [ -e "${MATCH}" ] || continue
+            if [ -d "${MATCH}" ]; then
+              while IFS= read -r -d '' f; do
+                REL="${f#./}"
+                # Check against exclude patterns
+                EXCLUDED=false
+                for EXCL in "${EXCLUDE_PATTERNS[@]}"; do
+                  case "${REL}" in
+                    ${EXCL}) EXCLUDED=true; break ;;
+                  esac
+                done
+                if [ "${EXCLUDED}" = "false" ]; then
+                  TARGET="${STAGING_DIR}/${REL}"
+                  mkdir -p "$(dirname "${TARGET}")"
+                  cp "${f}" "${TARGET}"
+                  FILE_COUNT=$((FILE_COUNT + 1))
+                fi
+              done < <(find "${MATCH}" -type f -print0)
+            else
+              REL=$(basename "${MATCH}")
+              EXCLUDED=false
+              for EXCL in "${EXCLUDE_PATTERNS[@]}"; do
+                case "${MATCH}" in
+                  ${EXCL}) EXCLUDED=true; break ;;
+                esac
+              done
+              if [ "${EXCLUDED}" = "false" ]; then
+                cp "${MATCH}" "${STAGING_DIR}/${REL}"
+                FILE_COUNT=$((FILE_COUNT + 1))
+              fi
+            fi
+          done
+          shopt -u globstar nullglob
+        done
+
+        # ── Handle no files found ──
+        if [ "${FILE_COUNT}" -eq 0 ]; then
           case "${{ inputs.if-no-files-found }}" in
             error)
-              echo "::error::Path not found: ${FILE_PATH}"
+              echo "::error::No files found for path: ${FILE_PATH}"
               exit 1
               ;;
             warn)
-              echo "::warning::Path not found: ${FILE_PATH}, skipping upload"
+              echo "::warning::No files found for path: ${FILE_PATH}, skipping upload"
               exit 0
               ;;
             ignore)
@@ -108,35 +170,18 @@ runs:
           esac
         fi
 
-        # ── Upload files ──
-        FILE_COUNT=0
-        TOTAL_SIZE=0
+        # ── Upload staged files ──
+        TOTAL_SIZE=$(du -sb "${STAGING_DIR}" | awk '{print $1}')
+        echo "Uploading ${FILE_COUNT} file(s), total size: ${TOTAL_SIZE} bytes"
 
-        if [ -d "${FILE_PATH}" ]; then
-          echo "Uploading directory: ${FILE_PATH}"
-          obsutil cp "${FILE_PATH}" "obs://${BUCKET}/${OBJECT_PREFIX}/" -r -f > /tmp/obsutil_upload.log 2>&1
-          if [ $? -ne 0 ]; then
-            echo "::error::Upload failed. See log:"
-            cat /tmp/obsutil_upload.log
-            exit 1
-          fi
-          FILE_COUNT=$(find "${FILE_PATH}" -type f | wc -l)
-          TOTAL_SIZE=$(du -sb "${FILE_PATH}" | awk '{print $1}')
-          UPLOAD_TYPE="directory"
-        else
-          echo "Uploading file: ${FILE_PATH}"
-          FILENAME=$(basename "${FILE_PATH}")
-          obsutil cp "${FILE_PATH}" "obs://${BUCKET}/${OBJECT_PREFIX}/${FILENAME}" > /tmp/obsutil_upload.log 2>&1
-          if [ $? -ne 0 ]; then
-            echo "::error::Upload failed. See log:"
-            cat /tmp/obsutil_upload.log
-            exit 1
-          fi
-          FILE_COUNT=1
-          TOTAL_SIZE=$(stat -c%s "${FILE_PATH}" 2>/dev/null || stat -f%z "${FILE_PATH}" 2>/dev/null)
-          UPLOAD_TYPE="file"
+        obsutil cp "${STAGING_DIR}" "obs://${BUCKET}/${OBJECT_PREFIX}/" -r -f > /tmp/obsutil_upload.log 2>&1
+        if [ $? -ne 0 ]; then
+          echo "::error::Upload failed. See log:"
+          cat /tmp/obsutil_upload.log
+          exit 1
         fi
 
+        rm -rf "${STAGING_DIR}"
         echo "Uploaded ${FILE_COUNT} file(s), total size: ${TOTAL_SIZE} bytes"
 
         # ── Write metadata ──
@@ -147,7 +192,6 @@ runs:
           "repository": "${REPO}",
           "run_id": "${RUN_ID}",
           "object_prefix": "${OBJECT_PREFIX}",
-          "upload_type": "${UPLOAD_TYPE}",
           "file_count": ${FILE_COUNT},
           "total_size": ${TOTAL_SIZE},
           "created_at": "${CREATED_AT}",
