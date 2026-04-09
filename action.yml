@@ -30,10 +30,16 @@ runs:
     - name: Download and setup obsutil
       shell: bash
       run: |
-        OBSUTIL_VERSION="5.5.12"
-        wget -q "https://obs-community.obs.cn-north-1.myhuaweicloud.com/obsutil/current/obsutil_linux_amd64.tar.gz" -O /tmp/obsutil.tar.gz
+        ARCH=$(uname -m)
+        if [ "${ARCH}" = "aarch64" ] || [ "${ARCH}" = "arm64" ]; then
+          OBSUTIL_ARCH="arm64"
+        else
+          OBSUTIL_ARCH="amd64"
+        fi
+        echo "Detected architecture: ${ARCH} -> obsutil_linux_${OBSUTIL_ARCH}"
+        curl -sSL "https://obs-community.obs.cn-north-1.myhuaweicloud.com/obsutil/current/obsutil_linux_${OBSUTIL_ARCH}.tar.gz" -o /tmp/obsutil.tar.gz
         tar -xzf /tmp/obsutil.tar.gz -C /tmp
-        OBSUTIL_DIR=$(find /tmp -maxdepth 1 -name "obsutil_linux_amd64_*" -type d | head -1)
+        OBSUTIL_DIR=$(find /tmp -maxdepth 1 -name "obsutil_linux_${OBSUTIL_ARCH}_*" -type d | head -1)
         chmod +x "${OBSUTIL_DIR}/obsutil"
         echo "${OBSUTIL_DIR}" >> $GITHUB_PATH
 
