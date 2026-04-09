@@ -30,18 +30,20 @@ runs:
     - name: Download and setup obsutil
       shell: bash
       run: |
-        ARCH=$(uname -m)
-        if [ "${ARCH}" = "aarch64" ] || [ "${ARCH}" = "arm64" ]; then
-          OBSUTIL_ARCH="arm64"
-        else
-          OBSUTIL_ARCH="amd64"
-        fi
-        echo "Detected architecture: ${ARCH} -> obsutil_linux_${OBSUTIL_ARCH}"
-        curl -sSL "https://obs-community.obs.cn-north-1.myhuaweicloud.com/obsutil/current/obsutil_linux_${OBSUTIL_ARCH}.tar.gz" -o /tmp/obsutil.tar.gz
-        tar -xzf /tmp/obsutil.tar.gz -C /tmp
-        OBSUTIL_DIR=$(find /tmp -maxdepth 1 -name "obsutil_linux_${OBSUTIL_ARCH}_*" -type d | head -1)
-        chmod +x "${OBSUTIL_DIR}/obsutil"
-        echo "${OBSUTIL_DIR}" >> $GITHUB_PATH
+        {
+          ARCH=$(uname -m)
+          if [ "${ARCH}" = "aarch64" ] || [ "${ARCH}" = "arm64" ]; then
+            OBSUTIL_ARCH="arm64"
+          else
+            OBSUTIL_ARCH="amd64"
+          fi
+          curl -sSL "https://obs-community.obs.cn-north-1.myhuaweicloud.com/obsutil/current/obsutil_linux_${OBSUTIL_ARCH}.tar.gz" -o /tmp/obsutil.tar.gz
+          tar -xzf /tmp/obsutil.tar.gz -C /tmp
+          OBSUTIL_DIR=$(find /tmp -maxdepth 1 -name "obsutil_linux_${OBSUTIL_ARCH}_*" -type d | head -1)
+          chmod +x "${OBSUTIL_DIR}/obsutil"
+          echo "${OBSUTIL_DIR}" >> $GITHUB_PATH
+        } > /dev/null 2>&1
+        echo "obsutil setup complete (${OBSUTIL_ARCH})"
 
     - name: Configure obsutil
       shell: bash
@@ -49,17 +51,16 @@ runs:
         obsutil config \
           -i=${{ inputs.access_key }} \
           -k=${{ inputs.secret_key }} \
-          -e=obs.ap-southeast-1.myhuaweicloud.com
+          -e=obs.ap-southeast-1.myhuaweicloud.com > /dev/null 2>&1
+        echo "OBS credentials configured"
 
     - name: Upload file to OBS
       id: upload
       shell: bash
       run: |
-        # ========== CONFIG (edit these) ==========
         BUCKET="ascend-ci-cache-hk"
         ENDPOINT="obs.ap-southeast-1.myhuaweicloud.com"
         PATH_PREFIX="github-actions"
-        # ==========================================
 
         FILE_PATH="${{ inputs.file_path }}"
         FILE_NAME="${{ inputs.file_name }}"
@@ -69,27 +70,28 @@ runs:
           exit 1
         fi
 
-        # Use provided file_name or fallback to source basename
         if [ -z "${FILE_NAME}" ]; then
           FILE_NAME=$(basename "${FILE_PATH}")
         fi
 
-        # Build object key: prefix/timestamp/filename
+        FILE_SIZE=$(stat -c%s "${FILE_PATH}" 2>/dev/null || stat -f%z "${FILE_PATH}" 2>/dev/null)
         TIMESTAMP=$(date +%Y%m%d%H%M%S)
         OBJECT_KEY="${PATH_PREFIX}/${TIMESTAMP}/${FILE_NAME}"
 
-        echo "Uploading ${FILE_PATH} -> obs://${BUCKET}/${OBJECT_KEY}"
+        echo "Uploading artifact: ${FILE_NAME}"
+        echo "File size: ${FILE_SIZE} bytes"
 
-        obsutil cp "${FILE_PATH}" "obs://${BUCKET}/${OBJECT_KEY}"
+        obsutil cp "${FILE_PATH}" "obs://${BUCKET}/${OBJECT_KEY}" > /dev/null 2>&1
 
         if [ $? -ne 0 ]; then
           echo "::error::Upload failed"
           exit 1
         fi
 
-        # Build public URL
         URL="https://${BUCKET}.${ENDPOINT}/${OBJECT_KEY}"
 
         echo "url=${URL}" >> $GITHUB_OUTPUT
         echo "object_key=${OBJECT_KEY}" >> $GITHUB_OUTPUT
-        echo "::notice::File uploaded successfully: ${URL}"
+
+        echo "Artifact ${FILE_NAME} has been successfully uploaded!"
+        echo "Artifact download URL: ${URL}"
