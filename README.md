@@ -11,12 +11,22 @@ Upload a file or directory as a named artifact. The name is used to retrieve it 
 
 ```yaml
 - name: Upload artifact
-  uses: ascend-gha-runners/artifact/upload@v0.2
+  uses: ascend-gha-runners/artifact/upload@v0.3
   with:
     access_key: ${{ secrets.HW_OBS_AK }}
     secret_key: ${{ secrets.HW_OBS_SK }}
     name: my-artifact          # artifact name, used for download
     path: ./dist/              # file or directory to upload
+```
+
+`path` also accepts multiline glob patterns with `!` exclusions:
+
+```yaml
+    path: |
+      dist/
+      results/*.json
+      !dist/**/*.map
+      !dist/**/*.log
 ```
 
 ### Upload inputs
@@ -26,8 +36,8 @@ Upload a file or directory as a named artifact. The name is used to retrieve it 
 | `access_key` | Yes | — | Huawei Cloud AK |
 | `secret_key` | Yes | — | Huawei Cloud SK |
 | `name` | Yes | — | Artifact name |
-| `path` | Yes | — | File or directory to upload |
-| `if-no-files-found` | No | `warn` | What to do if `path` does not exist: `warn` / `error` / `ignore` |
+| `path` | Yes | — | File, directory, or multiline glob patterns. Prefix a line with `!` to exclude. |
+| `if-no-files-found` | No | `warn` | What to do if no files match: `warn` / `error` / `ignore` |
 | `retention-days` | No | `90` | Recorded in metadata only, not enforced by OBS |
 | `bucket` | No | `ascend-ci-cache-hk` | OBS bucket |
 | `endpoint` | No | `obs.ap-southeast-1.myhuaweicloud.com` | OBS endpoint |
@@ -36,7 +46,7 @@ Upload a file or directory as a named artifact. The name is used to retrieve it 
 
 | Output | Description |
 |--------|-------------|
-| `artifact-id` | Artifact identifier: `{owner}/{repo}/{run_id}/{name}` |
+| `artifact-id` | Artifact identifier: `artifacts/{owner}/{repo}/{run_id}/{name}` |
 | `artifact-url` | OBS URL of the uploaded artifact |
 
 ---
@@ -45,11 +55,11 @@ Upload a file or directory as a named artifact. The name is used to retrieve it 
 
 ### By exact name
 
-Download a single artifact by its exact name.
+Download a single artifact by its exact name. Files are placed directly into `path/`, preserving their original directory structure.
 
 ```yaml
 - name: Download artifact
-  uses: ascend-gha-runners/artifact/download@v0.2
+  uses: ascend-gha-runners/artifact/download@v0.3
   with:
     access_key: ${{ secrets.HW_OBS_AK }}
     secret_key: ${{ secrets.HW_OBS_SK }}
@@ -60,7 +70,7 @@ Download a single artifact by its exact name.
 Result:
 ```
 output/
-└── <uploaded files>
+└── <uploaded files, original structure preserved>
 ```
 
 ### By glob pattern
@@ -69,7 +79,7 @@ Download multiple artifacts whose names match a pattern.
 
 ```yaml
 - name: Download matching artifacts
-  uses: ascend-gha-runners/artifact/download@v0.2
+  uses: ascend-gha-runners/artifact/download@v0.3
   with:
     access_key: ${{ secrets.HW_OBS_AK }}
     secret_key: ${{ secrets.HW_OBS_SK }}
@@ -91,7 +101,7 @@ output/
 When downloading multiple artifacts, `merge-multiple: true` places all files directly into `path/` instead of separate subdirectories. Only useful when the artifacts do not contain files with the same name.
 
 ```yaml
-- uses: ascend-gha-runners/artifact/download@v0.2
+- uses: ascend-gha-runners/artifact/download@v0.3
   with:
     ...
     pattern: timing-data-*
@@ -147,7 +157,7 @@ jobs:
         run: python benchmark.py --cards 1 --output timing.json
 
       - name: Upload timing data
-        uses: ascend-gha-runners/artifact/upload@v0.2
+        uses: ascend-gha-runners/artifact/upload@v0.3
         with:
           access_key: ${{ secrets.HW_OBS_AK }}
           secret_key: ${{ secrets.HW_OBS_SK }}
@@ -163,7 +173,7 @@ jobs:
         run: python benchmark.py --cards 2 --output timing.json
 
       - name: Upload timing data
-        uses: ascend-gha-runners/artifact/upload@v0.2
+        uses: ascend-gha-runners/artifact/upload@v0.3
         with:
           access_key: ${{ secrets.HW_OBS_AK }}
           secret_key: ${{ secrets.HW_OBS_SK }}
@@ -177,7 +187,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download all timing artifacts
-        uses: ascend-gha-runners/artifact/download@v0.2
+        uses: ascend-gha-runners/artifact/download@v0.3
         with:
           access_key: ${{ secrets.HW_OBS_AK }}
           secret_key: ${{ secrets.HW_OBS_SK }}
